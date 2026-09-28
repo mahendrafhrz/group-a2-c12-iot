@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>E-Nose | Analytical Dashboard</title>
+  <style>
+    :root { --navy:#092d58; --navy-2:#0d3b70; --blue:#2498f4; --cyan:#31d5bd; --yellow:#ffd45b; --orange:#ff936b; --ink:#eaf4ff; --muted:#9db9d6; --line:#1c5289; --page:#061f3f; }
+    * { box-sizing:border-box; }
+    body { margin:0; color:var(--ink); background:var(--page); font:14px/1.4 "Trebuchet MS",ui-sans-serif,sans-serif; }
+    .shell { min-height:100vh; display:grid; grid-template-columns:245px 1fr; background:linear-gradient(135deg,#061f3f 0%,#0a3261 55%,#092952 100%); }
+    aside { padding:28px 18px; border-right:1px solid #174b80; background:#062950; }
+    .brand { display:flex; gap:11px; align-items:center; margin:0 10px 38px; }
+    .brand-mark { width:38px; height:38px; display:grid; place-items:center; border:2px solid var(--cyan); border-radius:50%; color:var(--cyan); font-weight:800; }
+    .brand strong { display:block; font-size:16px; letter-spacing:.04em; }
+    .brand small { display:block; color:var(--muted); font-size:10px; margin-top:2px; }
+    nav { display:grid; gap:7px; }
+    nav a { color:#bad0e7; text-decoration:none; padding:11px 13px; border-radius:4px; }
+    nav a.active, nav a:hover { color:#fff; background:#14518e; }
+    nav a span { display:inline-block; width:25px; color:var(--cyan); font-weight:700; }
+    .device { margin:46px 8px 0; padding:15px 12px; border-top:1px solid #216097; color:var(--muted); font-size:12px; }
+    .device b { display:block; color:#fff; margin-bottom:8px; }
+    .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--yellow); margin-right:7px; }
+    main { min-width:0; padding:25px 28px 42px; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:24px; }
+    .eyebrow { color:var(--cyan); font-size:11px; font-weight:700; letter-spacing:.16em; text-transform:uppercase; }
+    h1 { margin:5px 0 0; font-size:29px; letter-spacing:.01em; }
+    .header p { margin:5px 0 0; color:var(--muted); }
+    .actions { display:flex; gap:9px; justify-content:flex-end; margin-bottom:12px; }
+    button { border:1px solid #3779ad; border-radius:4px; padding:10px 13px; background:#10467d; color:#fff; cursor:pointer; font:inherit; font-weight:700; }
+    button.primary { border-color:var(--cyan); background:var(--cyan); color:#063253; }
+    .status { padding:9px 12px; border:1px solid #297293; border-radius:4px; color:#bcefe8; white-space:nowrap; }
+    .status i { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--cyan); margin-right:7px; }
+    .kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+    .card { background:rgba(7,47,91,.9); border:1px solid var(--line); border-radius:3px; }
+    .kpi { padding:15px 17px; min-height:105px; }
+    .kpi span, .label { color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.08em; }
+    .kpi strong { display:block; margin-top:9px; font-size:29px; }
+    .kpi em { color:var(--cyan); font-size:11px; font-style:normal; }
+    .grid { display:grid; grid-template-columns:1.45fr 1fr .72fr; gap:12px; margin-top:12px; }
+    .panel { padding:17px; min-width:0; }
+    .wide { grid-column:span 2; }
+    .panel-head { display:flex; justify-content:space-between; align-items:start; gap:10px; margin-bottom:16px; }
+    h2 { margin:0; font-size:16px; letter-spacing:.02em; }
+    .panel-head p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+    .legend { display:flex; gap:12px; color:var(--muted); font-size:11px; }
+    .legend i { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; background:var(--blue); }
+    .legend i.orange { background:var(--orange); }
+    .chart { height:220px; display:flex; align-items:end; gap:7px; padding:15px 4px 0; border-bottom:1px solid #32638f; background:repeating-linear-gradient(to bottom,transparent 0,transparent 43px,#174b80 44px); }
+    .bar-wrap { flex:1; height:100%; min-width:7px; display:flex; align-items:center; flex-direction:column; justify-content:end; gap:5px; }
+    .bars { width:100%; height:calc(100% - 20px); display:flex; align-items:end; justify-content:center; gap:2px; }
+    .bar { width:45%; min-height:2px; border-radius:2px 2px 0 0; background:var(--blue); }
+    .bar.accuracy { background:var(--orange); }
+    .bar-label { color:var(--muted); font-size:10px; }
+    .bar-value { font-size:9px; color:#fff; }
+    .donut { width:142px; height:142px; margin:16px auto 13px; border-radius:50%; display:grid; place-items:center; background:conic-gradient(var(--cyan) 0 0%, #17446e 0 100%); }
+    .donut::after { content:""; width:94px; height:94px; border-radius:50%; background:var(--navy-2); grid-area:1/1; }
+    .donut b { z-index:1; grid-area:1/1; font-size:25px; }
+    .center { text-align:center; color:var(--muted); font-size:12px; }
+    .distribution { display:grid; gap:10px; margin-top:9px; }
+    .dist-row { display:grid; grid-template-columns:23px 1fr 42px; gap:8px; align-items:center; font-size:11px; color:var(--muted); }
+    .track { height:8px; background:#173f68; border-radius:2px; overflow:hidden; }
+    .track i { display:block; height:100%; background:var(--yellow); }
+    .table-wrap { max-height:270px; overflow:auto; }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th,td { padding:9px 6px; border-bottom:1px solid #174777; text-align:left; white-space:nowrap; }
+    th { color:var(--muted); font-size:10px; text-transform:uppercase; }
+    .score { color:var(--cyan); font-weight:700; }
+    .empty { padding:28px 8px; color:var(--muted); text-align:center; }
+    .tab-content { display:none; }
+    .tab-content.active { display:block; }
+    .admin-table { width:100%; font-size:12px; }
+    .admin-table th { background:#0a2d52; padding:10px; text-align:left; }
+    .admin-table td { padding:8px; border-bottom:1px solid #174777; }
+    .admin-table button { padding:6px 10px; font-size:11px; margin:0 2px; }
+    .admin-table button.danger { background:#dc3545; border-color:#dc3545; }
+    .search-box { margin-bottom:16px; padding:10px; background:rgba(7,47,91,.5); border:1px solid var(--line); border-radius:4px; }
+    .search-box input { width:100%; padding:8px; background:#0a2d52; border:1px solid #3779ad; border-radius:3px; color:#fff; }
+    @media (max-width:1000px) { .shell { grid-template-columns:70px 1fr; } aside { padding:22px 10px; } .brand { margin:0 6px 35px; } .brand strong,.brand small,.device { display:none; } nav a { text-align:center; padding:12px 3px; } nav a span { width:auto; } nav a:not(.active) { font-size:0; } .grid { grid-template-columns:1fr 1fr; } .wide { grid-column:span 2; } }
+    @media (max-width:680px) { .shell { display:block; } aside { display:flex; align-items:center; justify-content:space-between; padding:12px 16px; } .brand { margin:0; } nav { display:flex; gap:4px; } nav a { padding:8px; } nav a:not(.active) { font-size:0; } .device { display:none; } main { padding:22px 14px 35px; } .header { display:block; } .actions { justify-content:stretch; margin-top:16px; } .actions button { flex:1; } .kpis { grid-template-columns:1fr 1fr; } .grid { display:block; } .panel { margin-top:12px; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><div class="brand-mark">EN</div><div><strong>E-NOSE</strong><small>CLOUD ANALYTICS</small></div></div>
+      <nav><a class="active" onclick="showTab('overview')" href="#overview"><span>01</span>Overview</a><a onclick="showTab('admin')" href="#admin"><span>02</span>Database</a><a href="/api/v1/reports/analytics.pdf"><span>03</span>Reports</a></nav>
+      <div class="device"><b>DEVICE CHANNEL</b><span class="dot"></span><span id="device-status">Awaiting device data</span></div>
+    </aside>
+    <main>
+      <div class="header"><div><div class="eyebrow">E-Nose</div><h1 id="page-title">Dashboard</h1></div><div><div class="status"><i></i><span id="service-status">Checking service...</span></div></div></div>
+      
+      <!-- Overview Tab -->
+      <div id="tab-overview" class="tab-content active">
+      <div class="actions"><button id="refresh">Refresh data</button><button class="primary" id="report">Download Report</button></div>
+      <section class="kpis">
+        <div class="card kpi"><span>Total measurements</span><strong id="total">0</strong><em>records received</em></div>
+        <div class="card kpi"><span>Samples detected</span><strong id="samples">0</strong><em>coffee profiles</em></div>
+        <div class="card kpi"><span>Average score</span><strong id="score">0.00</strong><em>classification score</em></div>
+        <div class="card kpi"><span>Average accuracy</span><strong id="accuracy">0.00%</strong><em>model confidence</em></div>
+      </section>
+      <section class="grid">
+        <article class="card panel wide" id="samples"><div class="panel-head"><div><h2>Sample performance</h2><p>Score and accuracy across all coffee samples</p></div><div class="legend"><span><i></i>Score</span><span><i class="orange"></i>Accuracy</span></div></div><div class="chart" id="chart"><div class="empty">No measurement data yet</div></div></article>
+        <article class="card panel"><div class="panel-head"><div><h2>Model accuracy</h2><p>Average analytical confidence</p></div></div><div class="donut" id="donut"><b id="donut-value">0%</b></div><div class="center">Current evaluation accuracy</div></article>
+        <article class="card panel"><div class="panel-head"><div><h2>Sample coverage</h2><p>Measurements per sample</p></div></div><div class="distribution" id="distribution"><div class="empty">No data yet</div></div></article>
+        <article class="card panel wide" id="activity"><div class="panel-head"><div><h2>Latest activity</h2><p>Data terbaru yang diterima dari backend</p></div></div><div class="table-wrap"><table><thead><tr><th>Sample</th><th>Score</th><th>Accuracy</th><th>Device</th><th>Captured</th></tr></thead><tbody id="measurements"><tr><td colspan="5" class="empty">No measurement data yet</td></tr></tbody></table></div></article>
+      </section>
+      </div><!-- End Overview Tab -->
+
+      <!-- Admin Tab -->
+      <div id="tab-admin" class="tab-content">
+        <div class="actions"><button id="admin-refresh">Refresh</button><button class="danger" id="delete-all">Delete All Data</button></div>
+        <section class="card panel">
+          <div class="panel-head"><div><h2>Database Management</h2><p>View and manage measurement data</p></div></div>
+          <div class="search-box">
+            <input type="text" id="search-sample" placeholder="Search by sample name..." />
+          </div>
+          <div class="table-wrap" style="max-height:500px;">
+            <table class="admin-table">
+              <thead><tr><th>ID</th><th>Sample Name</th><th>Score</th><th>Accuracy</th><th>Timestamp</th><th>Actions</th></tr></thead>
+              <tbody id="admin-data"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </div><!-- End Admin Tab -->
+
+    </main>
+  </div>
+  <script>
+    const $ = id => document.getElementById(id);
+    const date = value => value ? new Date(value).toLocaleString('id-ID', {dateStyle:'short', timeStyle:'short'}) : '-';
+    
+    // Mapping sample_id ke nama kopi asli dari Raw Data Kopi Rafi
+    const sampleNames = {
+      1: 'Arabica Gayo',
+      2: 'Arabica Toraja', 
+      3: 'Arabica Jawa Tengah',
+      4: 'Arabica Bali',
+      5: 'Arabica Flores',
+      6: 'Arabica Wamena',
+      7: 'Robusta Lampung',
+      8: 'Robusta Bengkulu',
+      9: 'Robusta Jawa Timur',
+      10: 'Low Grade A',
+      11: 'Low Grade B',
+      12: 'Low Grade C',
+      13: 'Medium Blend',
+      14: 'Premium Blend',
+      15: 'Arabica Gayo (Val)',
+      16: 'Arabica Toraja (Val)',
+      17: 'Arabica Jawa (Val)',
+      18: 'Arabica Bali (Val)'
+    };
+    const getSampleName = id => sampleNames[id] || `Sample ${String(id).padStart(2,'0')}`;
+    
+    let allMeasurements = [];
+    
+    function showTab(tabName) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+      document.querySelectorAll('nav a').forEach(el => el.classList.remove('active'));
+      $(`tab-${tabName}`).classList.add('active');
+      event.target.closest('a').classList.add('active');
+      
+      const titles = {overview:'Dashboard', admin:'Database Management'};
+      $('page-title').textContent = titles[tabName] || 'E-Nose Cloud';
+      
+      if (tabName === 'admin') loadAdminData();
+    }
+    
+    let autoRefreshInterval = null;
+    
+    function startAutoRefresh() {
+      stopAutoRefresh(); // Clear any existing interval
+      autoRefreshInterval = setInterval(() => {
+        const activeTab = document.querySelector('.tab-content.active');
+        if (activeTab && activeTab.id === 'tab-overview') {
+          loadDashboard();
+        } else if (activeTab && activeTab.id === 'tab-admin') {
+          loadAdminData();
+        }
+      }, 5000); // Refresh every 5 seconds
+    }
+    
+    function stopAutoRefresh() {
+      if (autoRefreshInterval) {
+        clearInterval(autoRefreshInterval);
+        autoRefreshInterval = null;
+      }
+    }
+    
+    async function loadDashboard() {
+      try {
+        const [health, summary, measurements] = await Promise.all([fetch('/health').then(r => r.json()), fetch('/api/v1/analytics/summary').then(r => r.json()), fetch('/api/v1/measurements').then(r => r.json())]);
+        $('service-status').textContent = health.status === 'ok' ? 'Service online' : 'Service warning';
+        $('total').textContent = summary.total_measurements; $('samples').textContent = summary.sample_count; $('score').textContent = Number(summary.average_score).toFixed(2); $('accuracy').textContent = `${Number(summary.average_accuracy).toFixed(2)}%`;
+        $('device-status').textContent = measurements.length ? (measurements[0].device_id || 'Device connected') : 'Awaiting device data';
+        renderChart(summary.by_sample || []); renderDonut(Number(summary.average_accuracy)); renderDistribution(summary.by_sample || []); renderMeasurements(measurements || []);
+      } catch (error) { $('service-status').textContent = 'Service unavailable'; console.error(error); }
+    }
+    function renderChart(items) { const chart = $('chart'); chart.innerHTML = ''; if (!items.length) { chart.innerHTML = '<div class="empty">No measurement data yet</div>'; return; } items.forEach(item => { const score=Number(item.average_score), accuracy=Number(item.average_accuracy), wrap=document.createElement('div'); wrap.className='bar-wrap'; wrap.innerHTML=`<span class="bar-value">${score.toFixed(0)}</span><div class="bars"><i class="bar" style="height:${Math.max(score,1)}%"></i><i class="bar accuracy" style="height:${Math.max(accuracy,1)}%"></i></div><span class="bar-label">${item.sample_id}</span>`; chart.appendChild(wrap); }); }
+    function renderDonut(value) { const safe=Math.min(Math.max(value,0),100); $('donut').style.background=`conic-gradient(var(--cyan) 0 ${safe}%, #17446e ${safe}% 100%)`; $('donut-value').textContent=`${safe.toFixed(0)}%`; }
+    function renderDistribution(items) { const box=$('distribution'); box.innerHTML=''; if (!items.length) { box.innerHTML='<div class="empty">No data yet</div>'; return; } const max=Math.max(...items.map(x=>x.measurement_count),1); items.slice(0,6).forEach(item=>{ const row=document.createElement('div'); row.className='dist-row'; row.innerHTML=`<span>${String(item.sample_id).padStart(2,'0')}</span><div class="track"><i style="width:${item.measurement_count/max*100}%"></i></div><b>${item.measurement_count}</b>`; box.appendChild(row); }); }
+    function renderMeasurements(rows) { const body=$('measurements'); body.innerHTML=''; if (!rows.length) { body.innerHTML='<tr><td colspan="5" class="empty">No measurement data yet</td></tr>'; return; } rows.slice(0,12).forEach(row=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${getSampleName(row.sample_id)}</td><td class="score">${Number(row.score).toFixed(2)}</td><td>${Number(row.accuracy).toFixed(2)}%</td><td>${row.device_id || '-'}</td><td>${date(row.captured_at)}</td>`; body.appendChild(tr); }); }
+    
+    async function loadAdminData() {
+      try {
+        const data = await fetch('/api/v1/measurements').then(r => r.json());
+        allMeasurements = data || [];
+        renderAdminTable(allMeasurements);
+      } catch (error) {
+        $('admin-data').innerHTML = '<tr><td colspan="6" class="empty">Error loading data</td></tr>';
+      }
+    }
+    
+    function renderAdminTable(rows) {
+      const body = $('admin-data');
+      body.innerHTML = '';
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="6" class="empty">No data</td></tr>';
+        return;
+      }
+      rows.forEach(row => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${row.id.substring(0,8)}...</td>
+          <td>${getSampleName(row.sample_id)}</td>
+          <td>${Number(row.score).toFixed(2)}</td>
+          <td>${Number(row.accuracy).toFixed(2)}%</td>
+          <td>${date(row.captured_at)}</td>
+          <td><button class="danger" onclick="deleteMeasurement('${row.id}')">Delete</button></td>
+        `;
+        body.appendChild(tr);
+      });
+    }
+    
+    async function deleteMeasurement(id) {
+      if (!confirm('Delete this measurement?')) return;
+      try {
+        const response = await fetch(`/api/v1/measurements/${id}`, {method: 'DELETE'});
+        if (response.ok || response.status === 204) {
+          alert('Deleted successfully!');
+          loadAdminData();
+        } else {
+          alert('Delete failed: ' + response.status);
+        }
+      } catch (error) {
+        alert('Error: ' + error.message);
+      }
+    }
+    
+    async function deleteAllData() {
+      if (!confirm('⚠️ DELETE ALL DATA? This cannot be undone!')) return;
+      if (!confirm('Are you absolutely sure? All measurements will be permanently deleted!')) return;
+      
+      try {
+        const measurements = await fetch('/api/v1/measurements').then(r => r.json());
+        let deleted = 0;
+        for (const m of measurements) {
+          const res = await fetch(`/api/v1/measurements/${m.id}`, {method: 'DELETE'});
+          if (res.ok || res.status === 204) deleted++;
+        }
+        alert(`Deleted ${deleted} measurements`);
+        loadAdminData();
+        loadDashboard();
+      } catch (error) {
+        alert('Error: ' + error.message);
+      }
+    }
+    
+    $('search-sample').addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase();
+      const filtered = allMeasurements.filter(m => 
+        getSampleName(m.sample_id).toLowerCase().includes(query) ||
+        (m.id || '').toLowerCase().includes(query) ||
+        (m.device_id || '').toLowerCase().includes(query)
+      );
+      renderAdminTable(filtered);
+    });
+    
+    $('admin-refresh').addEventListener('click', loadAdminData);
+    $('delete-all').addEventListener('click', deleteAllData);
+    $('refresh').addEventListener('click', loadDashboard); $('report').addEventListener('click', () => window.location.href='/api/v1/reports/analytics.pdf'); loadDashboard(); startAutoRefresh();
+  </script>
+</body>
+</html>
