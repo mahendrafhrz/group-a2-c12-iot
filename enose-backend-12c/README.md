@@ -1,114 +1,341 @@
-# E-Nose Cloud Backend
+# E-Nose IoT System
 
-Bagian B untuk project E-Nose: REST API, MQTT ingestion, penyimpanan measurement, analytical summary, dan download analytical report PDF.
+<div align="center">
 
-## Menjalankan
+## Electronic Nose System for Coffee Quality Classification
 
-```powershell
-Copy-Item .env.example .env
-cargo run
+![Rust](https://img.shields.io/badge/rust-1.83+-orange.svg)
+![PostgreSQL](https://img.shields.io/badge/postgresql-14+-blue.svg)
+![MQTT](https://img.shields.io/badge/mqtt-HiveMQ-green.svg)
+![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)
+![Azure](https://img.shields.io/badge/azure-deployed-0078D4.svg)
+![ESP32](https://img.shields.io/badge/esp32--s3-supported-red.svg)
+![License](https://img.shields.io/badge/license-MIT-yellow.svg)
+![Status](https://img.shields.io/badge/status-production-brightgreen.svg)
+
+**Group 12 - C Class**
+
+Evan Javier Firdausi Malik - 2042241010  
+Mahendra Dwi Fahreza - 2042241023
+
+</div>
+
+---
+
+## 📋 Table of Contents
+
+- [Overview](#overview)
+- [System Architecture](#system-architecture)
+- [Key Features](#key-features)
+- [Technology Stack](#technology-stack)
+- [Screenshots](#screenshots)
+- [Configuration](#configuration)
+- [API Endpoints](#api-endpoints)
+- [Deployment](#deployment)
+- [Contributors](#contributors)
+
+---
+
+## 🎯 Overview
+
+E-Nose IoT System is a real-time coffee quality monitoring solution that combines embedded systems (ESP32), cloud infrastructure (Azure), and machine learning analytics to classify coffee samples based on electronic nose sensor data.
+
+**Project Goals:**
+- Real-time sensor data collection from ESP32 devices
+- Cloud-based data storage and processing
+- Over-The-Air (OTA) firmware updates for remote ESP32 management
+- Analytics dashboard with confidence trends and grade classification
+- PDF report generation for quality assurance
+
+**Use Cases:**
+- Coffee quality control in production facilities
+- Research and development for coffee grading systems
+- Remote monitoring of multiple coffee processing stations
+- Automated classification of coffee types (Arabica, Robusta, Liberica)
+
+---
+
+## 🏗️ System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         IoT Devices                             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
+│  │   ESP32-001  │  │   ESP32-002  │  │   ESP32-N    │         │
+│  │  (E-Nose)    │  │  (E-Nose)    │  │  (E-Nose)    │         │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘         │
+└─────────┼──────────────────┼──────────────────┼────────────────┘
+          │                  │                  │
+          │  MQTT Publish    │                  │
+          └──────────────────┴──────────────────┘
+                             │
+                             ▼
+          ┌──────────────────────────────────┐
+          │     MQTT Broker (HiveMQ)         │
+          │  broker.hivemq.com:1883          │
+          └──────────┬───────────────────────┘
+                     │
+                     ▼
+┌────────────────────────────────────────────────────────────────┐
+│                    Cloud Backend (Azure)                        │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │           Rust Backend (Axum Framework)                  │  │
+│  │  ┌─────────────────┐         ┌──────────────────┐       │  │
+│  │  │ MQTT Subscriber │◄────────┤  MQTT Publisher  │       │  │
+│  │  │ (Measurements)  │         │  (OTA Updates)   │       │  │
+│  │  └────────┬────────┘         └──────────────────┘       │  │
+│  │           │                                              │  │
+│  │           ▼                                              │  │
+│  │  ┌────────────────────────────────────────────┐         │  │
+│  │  │        PostgreSQL Database                 │         │  │
+│  │  │  (Railway - Persistent Storage)            │         │  │
+│  │  │  • measurements table                      │         │  │
+│  │  │  • device tracking                         │         │  │
+│  │  │  • analytics data                          │         │  │
+│  │  └────────────────────────────────────────────┘         │  │
+│  │           │                                              │  │
+│  │           ▼                                              │  │
+│  │  ┌────────────────────────────────────────────┐         │  │
+│  │  │         REST API Endpoints                 │         │  │
+│  │  │  /api/v1/measurements                      │         │  │
+│  │  │  /api/v1/analytics/summary                 │         │  │
+│  │  │  /api/v1/reports/analytics.pdf             │         │  │
+│  │  │  /api/v1/firmware/upload                   │         │  │
+│  │  └────────────────────────────────────────────┘         │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────┘
+                             │
+                             ▼
+          ┌──────────────────────────────────┐
+          │       Web Dashboard (UI)         │
+          │  • Real-time charts              │
+          │  • Data management               │
+          │  • OTA firmware upload           │
+          │  • PDF report download           │
+          └──────────────────────────────────┘
 ```
 
-API berjalan di `http://localhost:8080`.
+**Data Flow:**
+1. ESP32 sensors collect coffee aroma data
+2. ESP32 publishes measurements to MQTT broker
+3. Backend subscribes and stores data in PostgreSQL
+4. Dashboard queries REST API for visualization
+5. Admin uploads firmware → Backend broadcasts via MQTT
+6. ESP32 receives OTA update and flashes new firmware
 
-- `GET /dashboard` - dashboard analytical berbasis web
-- `GET /health`
-- `GET /api/v1/analytics/summary`
-- `GET /api/v1/measurements`
-- `POST /api/v1/measurements`
-- `GET /api/v1/reports/analytics.pdf`
+---
 
-## Mengisi data dummy dashboard
+## ✨ Key Features
 
-Dataset CSV terlampir dapat diagregasi dengan seeder Rust:
+### 📡 Real-Time Data Collection
+- Multi-device support (ESP32-001, ESP32-002, etc.)
+- MQTT-based communication with QoS 1
+- Automatic reconnection and retry mechanism
+- Device identification and tracking
 
-```powershell
-$env:DATABASE_URL="sqlite://./enose.db"
-$env:DATASET_ROOT="Raw Data Kopi Rafi\Raw Data Kopi Rafi"
-cargo run --bin seed_dataset
+### 📊 Analytics Dashboard
+- Live confidence trend visualization
+- Class distribution (High/Low grade)
+- Summary statistics (total samples, accuracy, confidence)
+- Recent measurements table with filtering
+
+### 🔄 OTA Firmware Updates
+- Over-The-Air firmware deployment to ESP32 devices
+- Chunked transfer (1KB chunks) with ACK mechanism
+- MD5 checksum verification
+- No physical access required for updates
+- Automatic device reboot after successful flash
+
+### 📈 Reporting & Export
+- PDF report generation with analytics
+- Sample data table with classification results
+- Dataset summary (high/low grade distribution)
+- Timestamp and metadata tracking
+
+### 🗄️ Database Management
+- PostgreSQL for persistent storage
+- Full CRUD operations on measurements
+- Device-level data filtering
+- Automatic schema management
+
+---
+
+## 🛠️ Technology Stack
+
+### Backend
+- **Language:** Rust 1.83+
+- **Web Framework:** Axum (async Tokio-based)
+- **Database:** PostgreSQL 14+ (Railway hosted)
+- **ORM:** SQLx (compile-time verified queries)
+- **MQTT Client:** Rumqttc (async MQTT 3.1.1)
+- **PDF Generation:** printpdf
+- **Serialization:** Serde JSON
+
+### Frontend
+- **UI:** HTML5, CSS3, JavaScript (ES6+)
+- **Charts:** Custom SVG-based visualizations
+- **Styling:** Modern dark theme with responsive design
+
+### Infrastructure
+- **Containerization:** Docker
+- **Cloud Platform:** Azure Web Apps
+- **Container Registry:** Azure Container Registry
+- **Database Hosting:** Railway PostgreSQL
+- **MQTT Broker:** HiveMQ (public broker)
+
+### IoT Devices
+- **Hardware:** ESP32-S3 microcontroller
+- **Firmware:** Rust (no_std, esp-hal)
+- **Communication:** WiFi + MQTT
+- **OTA:** Dual partition with rollback support
+
+---
+
+## 📸 Screenshots
+
+### 1. Dashboard - Real-Time Analytics
+![Dashboard](docs/images/dashboard.png)
+*Live monitoring with confidence trends, class distribution, and summary statistics*
+
+### 2. Data Management
+![Data Management](docs/images/data-management.png)
+*View, filter, and manage measurement data with device tracking*
+
+### 3. OTA Firmware Update
+![OTA Update](docs/images/ota-update.png)
+*Upload firmware binaries for over-the-air updates to ESP32 devices*
+
+### 4. PDF Report
+![PDF Report](docs/images/pdf-report.png)
+*Generated analytics report with measurement data and grade classification*
+
+### 5. Railway PostgreSQL Database
+![Railway Database](docs/images/railway-database.png)
+*Cloud-hosted PostgreSQL database with measurements table*
+
+---
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@host/db` |
+| `MQTT_BROKER` | MQTT broker hostname | `broker.hivemq.com` |
+| `MQTT_TOPIC` | Topic pattern for measurements | `enose/+/measurement` |
+| `DEVICE_ID` | Target ESP32 device for OTA | `ESP32-001` |
+| `BASE_URL` | Public backend URL | `https://your-domain.com` |
+| `PORT` | HTTP server port | `8080` |
+
+### MQTT Topics
+
+| Topic Pattern | Direction | Purpose |
+|---------------|-----------|---------|
+| `enose/{device_id}/measurement` | ESP32 → Backend | Sensor measurements |
+| `enose/{device_id}/ota/start` | Backend → ESP32 | OTA start signal |
+| `enose/{device_id}/ota/chunk` | Backend → ESP32 | Firmware chunks |
+| `enose/{device_id}/ota/complete` | Backend → ESP32 | OTA completion |
+| `enose/{device_id}/ota/ack` | ESP32 → Backend | Chunk acknowledgment |
+
+---
+
+## 🔌 API Endpoints
+
+### Measurements
+- `GET /api/v1/measurements` - Retrieve all measurements
+- `DELETE /api/v1/measurements/{id}` - Delete specific measurement
+
+### Analytics
+- `GET /api/v1/analytics/summary` - Get summary statistics
+- `GET /api/v1/reports/analytics.pdf` - Download PDF report
+
+### OTA
+- `POST /api/v1/firmware/upload` - Upload firmware for OTA update
+
+### Dashboard
+- `GET /` - Homepage
+- `GET /dashboard` - Main dashboard interface
+
+---
+
+## 🚀 Deployment
+
+### Production Stack
+- **Backend:** Azure Web Apps (Docker container)
+- **Database:** Railway PostgreSQL (cloud-hosted)
+- **MQTT Broker:** HiveMQ public broker
+- **Container Registry:** Azure Container Registry
+
+### Deployment Architecture
+```
+┌──────────────────────────────────────────────┐
+│         Azure Container Registry             │
+│  enosedashboard.azurecr.io                   │
+│  └─ enose-dashboard:latest                   │
+└──────────────────┬───────────────────────────┘
+                   │
+                   │ Pull Image
+                   ▼
+┌──────────────────────────────────────────────┐
+│         Azure Web App                        │
+│  enose-dashboard-app                         │
+│  └─ Docker Container (Rust Backend)          │
+│     ├─ Axum HTTP Server :8080                │
+│     ├─ MQTT Subscriber                       │
+│     └─ OTA Publisher                         │
+└──────────────────┬───────────────────────────┘
+                   │
+                   │ Database Connection
+                   ▼
+┌──────────────────────────────────────────────┐
+│         Railway PostgreSQL                   │
+│  └─ measurements table                       │
+│  └─ Persistent storage                       │
+└──────────────────────────────────────────────┘
 ```
 
-Seeder membaca 8 kanal sensor dari 12 folder (6 `high_grade` dan 6 `low_grade`), menghitung rerata kanal, lalu membuat satu record dashboard per folder. Record tersebut memakai `device_id` `dummy-dataset-high/low` agar mudah dibedakan dari data ESP32. Nilai score dan accuracy pada record dummy adalah nilai demo untuk visualisasi dashboard, bukan hasil prediksi Edge Impulse.
+### Key Deployment Features
+- Automatic container restart on failure
+- Environment variable injection via Azure configuration
+- Secure database connection with SSL
+- Scalable architecture with horizontal scaling capability
+- Centralized logging via Azure Application Insights
 
-Contoh ingest:
+---
 
-```powershell
-Invoke-RestMethod -Method Post http://localhost:8080/api/v1/measurements -ContentType 'application/json' -Body '{"sample_id":1,"score":86.5,"accuracy":94.2,"device_id":"esp32s3-lab-01","features":[0.12,0.31,0.44]}'
-```
+## 👥 Contributors
 
-## MQTT payload
+<div align="center">
 
-Publish JSON yang sama ke topic pada `MQTT_TOPIC`. MQTT worker memakai service ingestion yang sama dengan REST API.
+### Group 12 - C Class
 
-## Cloud deployment
+| Name | Student ID | Role |
+|------|------------|------|
+| **Evan Javier Firdausi Malik** | 2042241010 | IoT System & Embedded Development |
+| **Mahendra Dwi Fahreza** | 2042241023 | Backend & Cloud Infrastructure |
 
-Mode default memakai SQLite untuk development. Backend sekarang mendukung SQLite dan PostgreSQL melalui SQLx `AnyPool`.
+</div>
 
-### Azure Database for PostgreSQL
+---
 
-1. Buat Azure Database for PostgreSQL Flexible Server dan database `enose`.
-2. Izinkan koneksi dari service Azure yang akan menjalankan backend.
-3. Set environment variable berikut pada App Service/Container Apps, bukan di source code:
+## 📄 License
 
-```text
-DATABASE_URL=postgres://USER:PASSWORD@SERVER.postgres.database.azure.com:5432/enose?sslmode=require
-HOST=0.0.0.0
-PORT=8080
-```
+This project is licensed under the MIT License.
 
-4. Jalankan backend. Schema `measurements` dibuat otomatis saat startup.
+---
 
-Untuk menjalankan seeder ke database Azure, gunakan `DATABASE_URL` PostgreSQL yang sama dan tetap simpan password melalui Azure secret/environment setting:
+## 🔗 Links
 
-```powershell
-$env:DATABASE_URL="postgres://USER:PASSWORD@SERVER.postgres.database.azure.com:5432/enose?sslmode=require"
-cargo run --bin seed_dataset
-```
+- **GitHub Repository (Backend):** [mahendrafhrz/backend](https://github.com/mahendrafhrz/backend)
+- **GitHub Repository (ESP32):** [mahendrafhrz/esp32-rust](https://github.com/mahendrafhrz/esp32-rust)
+- **Live Dashboard:** [enose-dashboard-app.azurewebsites.net](https://enose-dashboard-app.azurewebsites.net)
 
-Jangan commit `.env` atau connection string yang berisi password. Dashboard frontend tetap memakai endpoint REST yang sama, sehingga tidak perlu mengetahui credential database.
+---
 
-### Deploy backend dan dashboard ke Azure Container Apps
+<div align="center">
 
-Database sudah berada di Azure setelah seeder berhasil. Agar dashboard dan backend juga cloud-hosted, gunakan Azure Container Apps. Jalankan Azure CLI dari folder project setelah login:
+**E-Nose IoT System** - Real-Time Coffee Quality Classification  
+© 2026 Group 12 - C Class
 
-```powershell
-az login
-az account set --subscription "SUBSCRIPTION_ID"
-az extension add --name containerapp --upgrade
-az provider register --namespace Microsoft.App
-az provider register --namespace Microsoft.OperationalInsights
-az group create --name rg-enose --location indonesiacentral
-az acr create --resource-group rg-enose --name enosecloudacr --sku Basic
-az acr build --registry enosecloudacr --image enose-cloud:latest .
-```
-
-Buat Container Apps environment dan aplikasi:
-
-```powershell
-az containerapp env create --name enose-env --resource-group rg-enose --location indonesiacentral
-
-$pgSecret = Read-Host "PostgreSQL DATABASE_URL" -AsSecureString
-$pgUrl = (New-Object System.Management.Automation.PSCredential("unused", $pgSecret)).GetNetworkCredential().Password
-$acrPassword = az acr credential show --name enosecloudacr --query "passwords[0].value" -o tsv
-
-az containerapp create `
-	--name enose-cloud-app `
-	--resource-group rg-enose `
-	--environment enose-env `
-	--image enosecloudacr.azurecr.io/enose-cloud:latest `
-	--registry-server enosecloudacr.azurecr.io `
-	--registry-username enosecloudacr `
-	--registry-password $acrPassword `
-	--target-port 8080 `
-	--ingress external `
-	--secrets "database-url=$pgUrl" `
-	--env-vars "DATABASE_URL=secretref:database-url" "HOST=0.0.0.0" "PORT=8080" "MQTT_ENABLED=false"
-```
-
-Ambil URL cloud:
-
-```powershell
-az containerapp show --name enose-cloud-app --resource-group rg-enose --query properties.configuration.ingress.fqdn -o tsv
-```
-
-Buka `https://URL_HASIL/dashboard`. Container Apps menjalankan API dan dashboard yang sama; dashboard tidak lagi bergantung pada komputer lokal. Untuk production, simpan `DATABASE_URL` di Azure Key Vault/secret management dan jangan menampilkannya di terminal history.
+</div>

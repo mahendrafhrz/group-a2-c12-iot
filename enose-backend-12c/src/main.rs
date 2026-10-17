@@ -1,7 +1,7 @@
 use anyhow::Result;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Multipart, Path as AxumPath, State},
     http::{HeaderValue, StatusCode, header},
     response::Html,
     response::{IntoResponse, Response},
@@ -16,6 +16,7 @@ use sqlx::{AnyPool, FromRow, any::AnyPoolOptions};
 use std::{
     borrow::Borrow, env, fs::OpenOptions, io::BufWriter, path::Path, sync::Arc, time::Duration,
 };
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{error, info, warn};
@@ -31,6 +32,9 @@ struct CreateMeasurement {
     sample_id: i32,
     score: f64,
     accuracy: f64,
+    predicted_class: Option<String>,
+    confidence: Option<f64>,
+    grade: Option<String>,
     source: Option<String>,
     device_id: Option<String>,
     features: Option<Vec<f64>>,
@@ -43,6 +47,9 @@ struct Measurement {
     sample_id: i32,
     score: f64,
     accuracy: f64,
+    predicted_class: Option<String>,
+    confidence: Option<f64>,
+    grade: Option<String>,
     source: String,
     device_id: Option<String>,
     features_json: Option<String>,
@@ -54,18 +61,45 @@ struct Measurement {
 struct AnalyticsSummary {
     total_measurements: i64,
     sample_count: i64,
-    average_score: f64,
-    average_accuracy: f64,
+    average_score: f32,
+    average_accuracy: f32,
     latest_captured_at: Option<String>,
     by_sample: Vec<SampleSummary>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ota_chunk_payload_is_aligned_to_4_bytes() {
+        let chunk = [0xAA, 0xBB, 0xCC];
+        let payload = align_ota_chunk_for_flash(7, &chunk);
+
+        assert_eq!(payload.len() % 4, 0);
+        assert_eq!(payload[0..2], 7u16.to_be_bytes());
+        assert_eq!(&payload[2..5], &[0xAA, 0xBB, 0xCC]);
+    }
 }
 
 #[derive(Debug, Serialize, FromRow)]
 struct SampleSummary {
     sample_id: i32,
     measurement_count: i64,
-    average_score: f64,
-    average_accuracy: f64,
+    average_score: f32,
+    average_accuracy: f32,
+}
+
+fn align_ota_chunk_for_flash(chunk_id: usize, chunk_data: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(2 + chunk_data.len() + 4);
+    payload.extend_from_slice(&(chunk_id as u16).to_be_bytes());
+    payload.extend_from_slice(chunk_data);
+
+    while payload.len() % 4 != 0 {
+        payload.push(0xFF);
+    }
+
+    payload
 }
 
 #[tokio::main]
@@ -89,9 +123,12 @@ async fn main() -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS measurements (
             id TEXT PRIMARY KEY,
-            sample_id INTEGER NOT NULL CHECK(sample_id BETWEEN 1 AND 18),
+            sample_id INTEGER NOT NULL,
             score REAL NOT NULL CHECK(score BETWEEN 0 AND 100),
             accuracy REAL NOT NULL CHECK(accuracy BETWEEN 0 AND 100),
+            predicted_class TEXT,
+            confidence REAL,
+            grade TEXT,
             source TEXT NOT NULL DEFAULT 'api',
             device_id TEXT,
             features_json TEXT,
@@ -101,13 +138,27 @@ async fn main() -> Result<()> {
     )
     .execute(&pool)
     .await?;
+    
+    // Add columns if they don't exist (for existing databases)
     let _ = sqlx::query("ALTER TABLE measurements ADD COLUMN source TEXT NOT NULL DEFAULT 'api'")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE measurements ADD COLUMN predicted_class TEXT")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE measurements ADD COLUMN confidence REAL")
+        .execute(&pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE measurements ADD COLUMN grade TEXT")
         .execute(&pool)
         .await;
 
     let state = AppState { pool };
+    
+    let state_arc = Arc::new(state);
+    
     if env("MQTT_ENABLED", "false").eq_ignore_ascii_case("true") {
-        tokio::spawn(mqtt_worker(state.clone()));
+        tokio::spawn(mqtt_worker((*state_arc).clone()));
     }
 
     let app = Router::new()
@@ -122,9 +173,13 @@ async fn main() -> Result<()> {
 
         .route("/api/v1/analytics/summary", get(summary))
         .route("/api/v1/reports/analytics.pdf", get(analytics_pdf))
+        
+        .route("/api/v1/firmware/upload", axum::routing::post(upload_firmware))
+        .route("/api/v1/firmware/{version}", get(download_firmware))
+        
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
-        .with_state(Arc::new(state));
+        .with_state(state_arc);
 
     let address = format!("{}:{}", env("HOST", "0.0.0.0"), env("PORT", "8080"));
     let listener = TcpListener::bind(&address).await?;
@@ -146,7 +201,9 @@ async fn list_measurements(
 ) -> Result<Json<Vec<Measurement>>, ApiError> {
     let rows = sqlx::query_as::<_, Measurement>(
         "SELECT id, sample_id, CAST(score AS DOUBLE PRECISION) AS score,
-         CAST(accuracy AS DOUBLE PRECISION) AS accuracy, source, device_id, features_json, captured_at, created_at
+         CAST(accuracy AS DOUBLE PRECISION) AS accuracy, predicted_class, 
+         CAST(confidence AS DOUBLE PRECISION) AS confidence, grade, source, device_id, 
+         features_json, captured_at, created_at
          FROM measurements ORDER BY captured_at DESC LIMIT 500",
     )
     .fetch_all(&state.pool)
@@ -168,17 +225,20 @@ async fn create_measurement(
         .transpose()?;
 
     let insert_sql = if is_postgres() {
-        "INSERT INTO measurements (id, sample_id, score, accuracy, source, device_id, features_json, captured_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+        "INSERT INTO measurements (id, sample_id, score, accuracy, predicted_class, confidence, grade, source, device_id, features_json, captured_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
     } else {
-        "INSERT INTO measurements (id, sample_id, score, accuracy, source, device_id, features_json, captured_at, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO measurements (id, sample_id, score, accuracy, predicted_class, confidence, grade, source, device_id, features_json, captured_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     };
     sqlx::query(insert_sql)
         .bind(&id)
         .bind(payload.sample_id)
         .bind(payload.score)
         .bind(payload.accuracy)
+        .bind(&payload.predicted_class)
+        .bind(payload.confidence)
+        .bind(&payload.grade)
         .bind(payload.source.unwrap_or_else(|| "api".to_string()))
         .bind(&payload.device_id)
         .bind(&features_json)
@@ -189,10 +249,12 @@ async fn create_measurement(
 
     let select_sql = if is_postgres() {
         "SELECT id, sample_id, CAST(score AS DOUBLE PRECISION) AS score,
-         CAST(accuracy AS DOUBLE PRECISION) AS accuracy, source, device_id, features_json, captured_at, created_at
+         CAST(accuracy AS DOUBLE PRECISION) AS accuracy, predicted_class, 
+         CAST(confidence AS DOUBLE PRECISION) AS confidence, grade, source, device_id, 
+         features_json, captured_at, created_at
          FROM measurements WHERE id = $1"
     } else {
-        "SELECT id, sample_id, score, accuracy, source, device_id, features_json, captured_at, created_at FROM measurements WHERE id = ?"
+        "SELECT id, sample_id, score, accuracy, predicted_class, confidence, grade, source, device_id, features_json, captured_at, created_at FROM measurements WHERE id = ?"
     };
     let measurement = sqlx::query_as::<_, Measurement>(select_sql)
         .bind(id)
@@ -255,305 +317,272 @@ async fn summary(State(state): State<Arc<AppState>>) -> Result<Json<AnalyticsSum
     Ok(Json(AnalyticsSummary {
         total_measurements,
         sample_count,
-        average_score,
-        average_accuracy,
+        average_score: average_score as f32,
+        average_accuracy: average_accuracy as f32,
         latest_captured_at,
         by_sample,
     }))
 }
 
 async fn analytics_pdf(State(state): State<Arc<AppState>>) -> Result<Response, ApiError> {
-    fn get_sample_name(id: i32) -> String {
-        match id {
-            1 => "Arabica Gayo".to_string(),
-            2 => "Arabica Toraja".to_string(),
-            3 => "Arabica Jawa Tengah".to_string(),
-            4 => "Arabica Bali".to_string(),
-            5 => "Arabica Flores".to_string(),
-            6 => "Arabica Wamena".to_string(),
-            7 => "Robusta Lampung".to_string(),
-            8 => "Robusta Bengkulu".to_string(),
-            9 => "Robusta Jawa Timur".to_string(),
-            10 => "Low Grade A".to_string(),
-            11 => "Low Grade B".to_string(),
-            12 => "Low Grade C".to_string(),
-            13 => "Medium Blend".to_string(),
-            14 => "Premium Blend".to_string(),
-            15 => "Arabica Gayo (Val)".to_string(),
-            16 => "Arabica Toraja (Val)".to_string(),
-            17 => "Arabica Jawa (Val)".to_string(),
-            18 => "Arabica Bali (Val)".to_string(),
-            _ => format!("Sample {:02}", id),
-        }
-    }
+    // Fetch measurements with grade field (limit to recent 20 for PDF performance)
+    let all_measurements = sqlx::query_as::<_, Measurement>(
+        "SELECT id, sample_id, score, accuracy, predicted_class, confidence, grade, source, device_id, features_json, captured_at, created_at
+         FROM measurements ORDER BY captured_at DESC LIMIT 20"
+    )
+    .fetch_all(&state.pool)
+    .await?;
     
-    let summary = summary(State(state)).await?.0;
+    // Calculate summary from fetched measurements only (no additional query)
+    let total_measurements = all_measurements.len() as i64;
+    let average_score = if !all_measurements.is_empty() {
+        all_measurements.iter().map(|m| m.score as f32).sum::<f32>() / total_measurements as f32
+    } else {
+        0.0f32
+    };
+    let average_accuracy = if !all_measurements.is_empty() {
+        all_measurements.iter().map(|m| m.accuracy as f32).sum::<f32>() / total_measurements as f32
+    } else {
+        0.0f32
+    };
+    
+    let summary = AnalyticsSummary {
+        total_measurements,
+        sample_count: 0,
+        average_score,
+        average_accuracy,
+        latest_captured_at: None,
+        by_sample: Vec::new(),
+    };
     let (document, page, layer) = PdfDocument::new(
-        "E-Nose Analytical Report",
+        "E-Nose Dashboard Report",
         Mm(210.0),
         Mm(297.0),
-        "Analytical Report",
+        "Dashboard Report",
     );
     let regular = document.add_builtin_font(BuiltinFont::Helvetica)?;
     let bold = document.add_builtin_font(BuiltinFont::HelveticaBold)?;
     let current_layer = document.get_page(page).get_layer(layer);
-    let navy = Color::Rgb(Rgb::new(0.05, 0.19, 0.23, None));
-    let teal = Color::Rgb(Rgb::new(0.15, 0.49, 0.51, None));
-    let pale = Color::Rgb(Rgb::new(0.91, 0.96, 0.96, None));
-    let line = Color::Rgb(Rgb::new(0.73, 0.82, 0.83, None));
-    let ink = Color::Rgb(Rgb::new(0.10, 0.16, 0.18, None));
-    let muted = Color::Rgb(Rgb::new(0.35, 0.43, 0.44, None));
+    
+    // Modern color palette - Green theme matching dashboard
+    let green = Color::Rgb(Rgb::new(0.086, 0.639, 0.290, None)); // #16a34a
+    let _dark_green = Color::Rgb(Rgb::new(0.082, 0.502, 0.239, None)); // #15803d
+    let light_bg = Color::Rgb(Rgb::new(0.961, 0.969, 0.980, None)); // #f5f7fa
     let white = Color::Rgb(Rgb::new(1.0, 1.0, 1.0, None));
+    let gray_text = Color::Rgb(Rgb::new(0.176, 0.216, 0.282, None)); // #2d3748
+    let muted_text = Color::Rgb(Rgb::new(0.392, 0.455, 0.545, None)); // #64748b
+    let border = Color::Rgb(Rgb::new(0.886, 0.910, 0.941, None)); // #e2e8f0
 
-    draw_rect(&current_layer, 0.0, 250.0, 210.0, 47.0, &navy);
-    draw_rect(&current_layer, 0.0, 245.0, 210.0, 5.0, &teal);
-    text(&current_layer, "E-NOSE", 11.0, 20.0, 284.0, &bold, &teal);
+    // Clean header - no navy background, just simple green accent
+    draw_rect(&current_layer, 0.0, 272.0, 210.0, 25.0, &white);
+    text(&current_layer, "E-Nose Dashboard", 22.0, 20.0, 282.0, &bold, &gray_text);
     text(
         &current_layer,
-        "Analytical Report",
-        24.0,
+        "Real-time Coffee Quality Monitoring Report",
+        11.0,
         20.0,
-        270.0,
-        &bold,
-        &white,
-    );
-    text(
-        &current_layer,
-        "Coffee aroma detection and cloud data analysis",
-        10.0,
-        20.0,
-        258.0,
+        274.0,
         &regular,
-        &pale,
+        &muted_text,
     );
+    
+    // Date/time in top right
     text(
         &current_layer,
-        "REPORT A-001",
+        &format!("{}", Utc::now().format("%B %d, %Y")),
         9.0,
-        166.0,
-        283.0,
-        &bold,
-        &white,
-    );
-    text(
-        &current_layer,
-        &format!("{}", Utc::now().format("%d-%b-%Y")),
-        8.0,
-        166.0,
-        276.0,
+        150.0,
+        284.0,
         &regular,
-        &pale,
+        &gray_text,
     );
     text(
         &current_layer,
         &format!("{}", Utc::now().format("%H:%M UTC")),
-        7.5,
-        166.0,
-        269.0,
+        8.0,
+        150.0,
+        277.0,
         &regular,
-        &pale,
+        &muted_text,
     );
+    
+    // Green divider line
+    draw_rect(&current_layer, 20.0, 268.0, 170.0, 1.0, &green);
 
-    section_title(
-        &current_layer,
-        "EXECUTIVE SUMMARY",
-        20.0,
-        233.0,
-        170.0,
-        &teal,
-        &bold,
-        &white,
-    );
+    // Stats cards - matching dashboard layout
+    text(&current_layer, "Overview", 14.0, 20.0, 258.0, &bold, &gray_text);
+    
+    // Count high/low grade from actual measurements
+    let high_count = all_measurements.iter().filter(|m| m.grade.as_deref() == Some("high_grade")).count();
+    let low_count = all_measurements.iter().filter(|m| m.grade.as_deref() == Some("low_grade")).count();
+    
+    // Calculate average confidence from confidence field
+    let avg_confidence = if !all_measurements.is_empty() {
+        all_measurements.iter()
+            .map(|m| m.confidence.unwrap_or(m.score / 100.0) as f32)
+            .sum::<f32>() / all_measurements.len() as f32
+    } else {
+        0.0f32
+    };
+    
     let cards = [
-        ("TOTAL MEASUREMENTS", summary.total_measurements.to_string()),
-        ("SAMPLES DETECTED", format!("{} / 18", summary.sample_count)),
-        ("AVERAGE SCORE", format!("{:.2}", summary.average_score)),
-        (
-            "AVERAGE ACCURACY",
-            format!("{:.2}%", summary.average_accuracy),
-        ),
+        ("Total Samples", summary.total_measurements.to_string(), "measurements received"),
+        ("Classes Detected", "2".to_string(), &format!("High: {} | Low: {}", high_count, low_count)),
+        ("Avg Confidence", format!("{:.1}%", avg_confidence * 100.0), "model certainty"),
+        ("Accuracy", format!("{:.1}%", summary.average_accuracy), "prediction accuracy"),
     ];
-    for (index, (label, value)) in cards.iter().enumerate() {
-        let x = 20.0 + index as f64 * 43.0;
-        draw_rect(&current_layer, x, 207.0, 39.0, 21.0, &pale);
-        draw_rect(&current_layer, x, 226.0, 39.0, 2.0, &teal);
-        text(&current_layer, label, 7.0, x + 3.0, 220.0, &bold, &muted);
-        text(&current_layer, value, 16.0, x + 3.0, 211.0, &bold, &ink);
+    
+    let mut card_x = 20.0;
+    for (label, value, subtitle) in &cards {
+        // White card with subtle shadow
+        draw_rect(&current_layer, card_x, 227.0, 40.0, 24.0, &white);
+        draw_rect(&current_layer, card_x, 226.5, 40.0, 0.5, &border);
+        
+        text(&current_layer, label, 8.0, card_x + 3.0, 246.0, &regular, &muted_text);
+        text(&current_layer, value, 16.0, card_x + 3.0, 237.0, &bold, &green);
+        text(&current_layer, subtitle, 7.0, card_x + 3.0, 229.0, &regular, &muted_text);
+        
+        card_x += 42.5;
     }
 
-    section_title(
-        &current_layer,
-        "SAMPLE PERFORMANCE",
-        20.0,
-        197.0,
-        170.0,
-        &teal,
-        &bold,
-        &white,
-    );
-    draw_rect(&current_layer, 20.0, 181.0, 170.0, 14.0, &pale);
-    text(&current_layer, "SAMPLE", 8.0, 24.0, 187.0, &bold, &muted);
-    text(
-        &current_layer,
-        "MEASUREMENTS",
-        8.0,
-        53.0,
-        187.0,
-        &bold,
-        &muted,
-    );
-    text(&current_layer, "SCORE", 8.0, 102.0, 187.0, &bold, &muted);
-    text(&current_layer, "ACCURACY", 8.0, 137.0, 187.0, &bold, &muted);
-    text(&current_layer, "STATUS", 8.0, 169.0, 187.0, &bold, &muted);
+    // Recent Measurements Table
+    text(&current_layer, "Recent Measurements", 14.0, 20.0, 215.0, &bold, &gray_text);
+    
+    // Table header
+    draw_rect(&current_layer, 20.0, 199.0, 170.0, 10.0, &light_bg);
+    text(&current_layer, "Sample", 8.5, 24.0, 203.0, &bold, &muted_text);
+    text(&current_layer, "Count", 8.5, 75.0, 203.0, &bold, &muted_text);
+    text(&current_layer, "Confidence", 8.5, 105.0, 203.0, &bold, &muted_text);
+    text(&current_layer, "Accuracy", 8.5, 145.0, 203.0, &bold, &muted_text);
+    text(&current_layer, "Class", 8.5, 172.0, 203.0, &bold, &muted_text);
 
-    let mut y = 175.0;
-    // Limit to latest 15 samples
-    let samples_to_show: Vec<_> = summary.by_sample.iter().rev().take(15).collect();
-    for sample in samples_to_show {
-        if sample.sample_id % 2 == 0 {
+    let mut y = 192.0;
+    // Show latest 12 measurements (not grouped by sample_id)
+    let measurements_to_show: Vec<_> = all_measurements.iter().take(12).collect();
+    
+    for (idx, measurement) in measurements_to_show.iter().enumerate() {
+        // Alternating row background
+        if idx % 2 == 1 {
             draw_rect(
                 &current_layer,
                 20.0,
-                y - 2.0,
+                y - 1.0,
                 170.0,
-                8.0,
-                Color::Rgb(Rgb::new(0.97, 0.98, 0.98, None)),
+                7.0,
+                Color::Rgb(Rgb::new(0.98, 0.988, 0.992, None)),
             );
         }
+        
+        // Use grade field from database
+        let grade = measurement.grade.as_deref().unwrap_or("unknown");
+        let class_label = if grade == "high_grade" { "High Grade" } else { "Low Grade" };
+        let class_color = if grade == "high_grade" { &green } else { &Color::Rgb(Rgb::new(0.863, 0.106, 0.106, None)) };
+        
+        // Use predicted_class if available, otherwise use sample_id
+        let sample_name = measurement.predicted_class.clone()
+            .unwrap_or_else(|| format!("Sample {}", measurement.sample_id));
+        
         text(
             &current_layer,
-            &get_sample_name(sample.sample_id),
-            8.5,
+            &sample_name,
+            8.0,
             24.0,
             y,
-            &bold,
-            &ink,
+            &regular,
+            &gray_text,
         );
         text(
             &current_layer,
-            &sample.measurement_count.to_string(),
-            8.5,
-            59.0,
+            "1", // Individual measurement, count = 1
+            8.0,
+            78.0,
             y,
             &regular,
-            &ink,
+            &gray_text,
         );
         text(
             &current_layer,
-            &format!("{:.2}", sample.average_score),
-            8.5,
-            105.0,
+            &format!("{:.1}%", (measurement.confidence.unwrap_or(measurement.score / 100.0) * 100.0)),
+            8.0,
+            108.0,
             y,
             &regular,
-            &ink,
+            &gray_text,
         );
         text(
             &current_layer,
-            &format!("{:.2}%", sample.average_accuracy),
-            8.5,
-            140.0,
+            &format!("{:.1}%", measurement.accuracy),
+            8.0,
+            148.0,
             y,
             &regular,
-            &ink,
+            &gray_text,
         );
-        let status = if sample.average_accuracy >= 85.0 {
-            "REVIEWED"
-        } else {
-            "MONITOR"
-        };
         text(
             &current_layer,
-            status,
-            7.5,
-            169.0,
+            class_label,
+            8.0,
+            172.0,
             y,
             &bold,
-            if status == "REVIEWED" { &teal } else { &muted },
+            class_color,
         );
-        draw_rule(&current_layer, 20.0, y - 3.0, 190.0, &line);
-        y -= 8.0;
+        
+        // Subtle separator line
+        draw_rect(&current_layer, 20.0, y - 2.0, 170.0, 0.3, &border);
+        y -= 7.0;
     }
 
-    // Calculate where the table ends (minimum Y position after all samples)
-    let table_end_y = y.min(100.0); // Ensure at least 100mm from top
+    // Calculate where the table ends
+    let table_end_y = y.max(80.0);
     
-    let high_count = summary
-        .by_sample
-        .iter()
-        .filter(|sample| sample.sample_id <= 6)
-        .count();
-    let low_count = summary.by_sample.len().saturating_sub(high_count);
+    // Dataset Summary section
+    let info_y = table_end_y - 10.0;
+    text(&current_layer, "Dataset Summary", 14.0, 20.0, info_y, &bold, &gray_text);
     
-    // Position DATASET COVERAGE and REPORT NOTES below the table
-    let coverage_y = table_end_y - 15.0;
-    let boxes_y = table_end_y - 31.0;
+    let box_y = info_y - 18.0;
     
-    section_title(
+    // Single info box
+    draw_rect(&current_layer, 20.0, box_y, 170.0, 16.0, &white);
+    draw_rect(&current_layer, 20.0, box_y - 0.5, 170.0, 0.5, &border);
+    
+    text(
         &current_layer,
-        "DATASET COVERAGE",
+        &format!("High Grade: {} samples", high_count),
+        9.0,
+        24.0,
+        box_y + 9.0,
+        &regular,
+        &gray_text,
+    );
+    text(
+        &current_layer,
+        &format!("Low Grade: {} samples", low_count),
+        9.0,
+        24.0,
+        box_y + 3.0,
+        &regular,
+        &gray_text,
+    );
+    
+    // Footer
+    text(
+        &current_layer,
+        "Generated from E-Nose Dashboard - Real-time coffee quality monitoring system",
+        7.5,
         20.0,
-        coverage_y,
-        82.0,
-        &teal,
-        &bold,
-        &white,
-    );
-    section_title(
-        &current_layer,
-        "REPORT NOTES",
-        108.0,
-        coverage_y,
-        82.0,
-        &teal,
-        &bold,
-        &white,
-    );
-    draw_rect(&current_layer, 20.0, boxes_y, 82.0, 21.0, &pale);
-    draw_rect(&current_layer, 108.0, boxes_y, 82.0, 21.0, &pale);
-    text(
-        &current_layer,
-        &format!("High grade: {} samples", high_count),
-        9.0,
-        24.0,
-        boxes_y + 14.0,
+        15.0,
         &regular,
-        &ink,
+        &muted_text,
     );
     text(
         &current_layer,
-        &format!("Low grade: {} samples", low_count),
-        9.0,
-        24.0,
-        boxes_y + 6.0,
-        &regular,
-        &ink,
-    );
-    text(
-        &current_layer,
-        "Dashboard-ready aggregate",
-        8.0,
-        112.0,
-        boxes_y + 14.0,
-        &regular,
-        &ink,
-    );
-    text(
-        &current_layer,
-        "Feature vectors: 8 sensor channels",
-        8.0,
-        112.0,
-        boxes_y + 6.0,
-        &regular,
-        &ink,
-    );
-    text(
-        &current_layer,
-        "Demo dataset score/accuracy values are analytical placeholders until Edge Impulse predictions are connected.",
+        "Confidence values represent model certainty in classification results",
         7.0,
         20.0,
-        17.0,
+        10.0,
         &regular,
-        &muted,
+        &muted_text,
     );
     let mut bytes = Vec::new();
     document.save(&mut BufWriter::new(std::io::Cursor::new(&mut bytes)))?;
@@ -564,7 +593,7 @@ async fn analytics_pdf(State(state): State<Arc<AppState>>) -> Result<Response, A
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("attachment; filename=analytical-report.pdf"),
+        HeaderValue::from_static("attachment; filename=enose-dashboard-report.pdf"),
     );
     Ok(response)
 }
@@ -637,12 +666,12 @@ fn section_title<C1: Borrow<Color>, C2: Borrow<Color>>(
 }
 
 fn validate(payload: &CreateMeasurement) -> Result<(), ApiError> {
-    if !(1..=18).contains(&payload.sample_id)
+    if payload.sample_id < 1
         || !(0.0..=100.0).contains(&payload.score)
         || !(0.0..=100.0).contains(&payload.accuracy)
     {
         return Err(ApiError::BadRequest(
-            "sample_id must be 1..18 and score/accuracy must be 0..100".into(),
+            "sample_id must be >= 1 and score/accuracy must be 0..100".into(),
         ));
     }
     Ok(())
@@ -664,7 +693,7 @@ async fn mqtt_worker(state: AppState) {
             broker.clone(),
             port,
         );
-        options.set_keep_alive(Duration::from_secs(30));
+        options.set_keep_alive(Duration::from_secs(60));
         
         // Set credentials if provided
         if let (Some(user), Some(pass)) = (username.as_ref(), password.as_ref()) {
@@ -812,4 +841,288 @@ impl IntoResponse for ApiError {
             }
         }
     }
+}
+
+// OTA Firmware Upload Handler
+async fn upload_firmware(
+    State(_state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let mut firmware_data: Option<Vec<u8>> = None;
+    let mut version: Option<String> = None;
+
+    // Parse multipart form
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        ApiError::BadRequest(format!("Multipart error: {}", e))
+    })? {
+        let name = field.name().unwrap_or("").to_string();
+
+        if name == "firmware" {
+            let data = field.bytes().await.map_err(|e| {
+                ApiError::BadRequest(format!("Read firmware error: {}", e))
+            })?;
+            firmware_data = Some(data.to_vec());
+        } else if name == "version" {
+            let text = field.text().await.map_err(|e| {
+                ApiError::BadRequest(format!("Read version error: {}", e))
+            })?;
+            version = Some(text);
+        }
+    }
+
+    let firmware_data = firmware_data.ok_or_else(|| {
+        ApiError::BadRequest("Missing firmware file".to_string())
+    })?;
+    
+    let version = version.ok_or_else(|| {
+        ApiError::BadRequest("Missing version".to_string())
+    })?;
+
+    // Create firmware directory if not exists
+    let firmware_dir = std::path::Path::new("./firmware");
+    if !firmware_dir.exists() {
+        tokio::fs::create_dir_all(firmware_dir).await.map_err(|e| {
+            ApiError::Internal(e.into())
+        })?;
+    }
+
+    // Save firmware file
+    let filename = format!("firmware_{}.bin", version);
+    let filepath = firmware_dir.join(&filename);
+    
+    let mut file = tokio::fs::File::create(&filepath).await.map_err(|e| {
+        ApiError::Internal(e.into())
+    })?;
+    
+    file.write_all(&firmware_data).await.map_err(|e| {
+        ApiError::Internal(e.into())
+    })?;
+
+    // Calculate checksum (MD5)
+    let checksum = format!("{:x}", md5::compute(&firmware_data));
+    
+    // Get base URL
+    let base_url = env::var("BASE_URL")
+        .unwrap_or_else(|_| "https://enose-dashboard-app.azurewebsites.net".to_string());
+    let download_url = format!("{}/api/v1/firmware/{}", base_url, version);
+
+    info!(
+        version = %version,
+        size = firmware_data.len(),
+        checksum = %checksum,
+        "Firmware uploaded successfully"
+    );
+
+    // Clone for response
+    let response_version = version.clone();
+    let response_size = firmware_data.len();
+    let response_checksum = checksum.clone();
+
+    // Publish OTA update via MQTT with 1KB chunks + ACK mechanism
+    tokio::spawn(async move {
+        let broker = env("MQTT_BROKER", "broker.hivemq.com");
+        let port = env("MQTT_PORT", "1883").parse().unwrap_or(1883);
+        let device_id = env("DEVICE_ID", "ESP32-001");
+        let chunk_delay_ms = env("OTA_CHUNK_DELAY_MS", "500").parse().unwrap_or(500);
+        let ack_timeout_secs = env("OTA_ACK_TIMEOUT_SECS", "10").parse().unwrap_or(10);
+        let max_retries = env("OTA_MAX_RETRIES", "3").parse().unwrap_or(3);
+        
+        let mut options = MqttOptions::new("enose-ota-publisher", broker.clone(), port);
+        options.set_keep_alive(Duration::from_secs(120));
+        
+        let (client, mut event_loop) = AsyncClient::new(options, 50);
+        
+        // Subscribe to ACK topic
+        let ack_topic = format!("enose/{}/ota/ack", device_id);
+        if let Err(e) = client.subscribe(&ack_topic, QoS::AtLeastOnce).await {
+            error!(?e, "Failed to subscribe to ACK topic");
+            return;
+        }
+        
+        // Spawn event loop handler to receive ACKs
+        let (ack_tx, mut ack_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+        tokio::spawn(async move {
+            loop {
+                match event_loop.poll().await {
+                    Ok(rumqttc::Event::Incoming(rumqttc::Packet::Publish(msg))) => {
+                        // Parse ACK: {"chunk_id": 123}
+                        if let Ok(ack_data) = serde_json::from_slice::<serde_json::Value>(&msg.payload) {
+                            if let Some(chunk_id) = ack_data.get("chunk_id").and_then(|v| v.as_u64()) {
+                                let _ = ack_tx.send(chunk_id as usize);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(?e, "MQTT event loop error");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        
+        // Split firmware into 1KB chunks
+        const CHUNK_SIZE: usize = 1024;
+        let total_chunks = (firmware_data.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        
+        info!(
+            version = %version,
+            size = firmware_data.len(),
+            chunks = total_chunks,
+            chunk_delay_ms = chunk_delay_ms,
+            ack_timeout_secs = ack_timeout_secs,
+            "Starting OTA via MQTT chunks with ACK mechanism"
+        );
+        
+        // 1. Send OTA START message
+        let start_topic = format!("enose/{}/ota/start", device_id);
+        let start_message = serde_json::json!({
+            "version": version,
+            "total_size": firmware_data.len(),
+            "total_chunks": total_chunks,
+            "chunk_size": CHUNK_SIZE,
+            "checksum": checksum,
+            "ack_enabled": true,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        
+        if let Err(e) = client.publish(
+            &start_topic,
+            QoS::AtLeastOnce,
+            false,
+            serde_json::to_vec(&start_message).unwrap_or_default()
+        ).await {
+            error!(?e, "Failed to publish OTA START");
+            return;
+        }
+        
+        info!(%start_topic, "OTA START sent (ACK mode enabled)");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        
+        // 2. Send firmware chunks with ACK wait
+        let chunk_topic = format!("enose/{}/ota/chunk", device_id);
+        for (chunk_id, chunk_data) in firmware_data.chunks(CHUNK_SIZE).enumerate() {
+            let mut retry_count = 0;
+            let mut ack_received = false;
+            
+            while !ack_received && retry_count <= max_retries {
+                // Format: [chunk_id: 2 bytes][data: up to 1024 bytes][padding to 4-byte boundary]
+                let payload = align_ota_chunk_for_flash(chunk_id, chunk_data);
+
+                if let Err(e) = client.publish(&chunk_topic, QoS::AtLeastOnce, false, payload).await {
+                    error!(?e, chunk_id, retry_count, "Failed to publish chunk");
+                    retry_count += 1;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+
+                // Wait for ACK with timeout
+                match tokio::time::timeout(
+                    Duration::from_secs(ack_timeout_secs),
+                    ack_rx.recv()
+                ).await {
+                    Ok(Some(acked_chunk_id)) if acked_chunk_id == chunk_id => {
+                        ack_received = true;
+                        if chunk_id % 10 == 0 {
+                            info!(chunk_id, total_chunks, "OTA chunk ACKed");
+                        }
+                    }
+                    Ok(Some(other_id)) => {
+                        warn!(chunk_id, received_id = other_id, "Received ACK for wrong chunk");
+                    }
+                    Ok(None) => {
+                        warn!(chunk_id, "ACK channel closed");
+                        return;
+                    }
+                    Err(_) => {
+                        retry_count += 1;
+                        warn!(chunk_id, retry_count, max_retries, "ACK timeout, retrying...");
+                    }
+                }
+            }
+            
+            if !ack_received {
+                error!(chunk_id, "Failed to receive ACK after {} retries, aborting OTA", max_retries);
+                return;
+            }
+
+            // Configurable delay between chunks
+            tokio::time::sleep(Duration::from_millis(chunk_delay_ms)).await;
+        }
+        
+        info!("All OTA chunks sent and ACKed successfully!");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        
+        // 3. Send OTA COMPLETE message
+        let complete_topic = format!("enose/{}/ota/complete", device_id);
+        let complete_message = serde_json::json!({
+            "version": version,
+            "checksum": checksum,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        
+        if let Err(e) = client.publish(
+            &complete_topic,
+            QoS::AtLeastOnce,
+            false,
+            serde_json::to_vec(&complete_message).unwrap_or_default()
+        ).await {
+            error!(?e, "Failed to publish OTA COMPLETE");
+            return;
+        }
+        
+        info!(%complete_topic, "OTA COMPLETE sent - firmware published via MQTT with ACK!");
+    });
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Firmware uploaded and OTA started via MQTT with ACK mechanism",
+        "version": response_version,
+        "size": response_size,
+        "checksum": response_checksum,
+        "mqtt_topics": {
+            "start": format!("enose/{}/ota/start", env("DEVICE_ID", "ESP32-001")),
+            "chunk": format!("enose/{}/ota/chunk", env("DEVICE_ID", "ESP32-001")),
+            "complete": format!("enose/{}/ota/complete", env("DEVICE_ID", "ESP32-001")),
+            "ack": format!("enose/{}/ota/ack", env("DEVICE_ID", "ESP32-001")),
+        },
+        "config": {
+            "chunk_delay_ms": env("OTA_CHUNK_DELAY_MS", "500"),
+            "ack_timeout_secs": env("OTA_ACK_TIMEOUT_SECS", "10"),
+            "max_retries": env("OTA_MAX_RETRIES", "3"),
+        }
+    })))
+}
+
+// OTA Firmware Download Handler
+async fn download_firmware(
+    AxumPath(version): AxumPath<String>,
+) -> Result<Response, ApiError> {
+    let filename = format!("firmware_{}.bin", version);
+    let filepath = std::path::Path::new("./firmware").join(&filename);
+
+    if !filepath.exists() {
+        return Err(ApiError::BadRequest(format!("Firmware version {} not found", version)));
+    }
+
+    let data = tokio::fs::read(&filepath).await.map_err(|e| {
+        ApiError::Internal(e.into())
+    })?;
+
+    info!(version = %version, size = data.len(), "Firmware downloaded");
+
+    let mut response = data.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+    );
+
+    Ok(response)
 }
